@@ -3,20 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math/rand"
 	"sync"
-	"time"
 )
 
 type TicketBookingSystem struct {
 	totalTickets, bookedTickets int64
 	mx                          sync.Mutex
 	totalFailed                 int64
-}
-
-type TBS struct {
-	totalT, bookedT, failed int64
-	m                       sync.Mutex
+	tBooked                     map[int]int
 }
 
 type WorkerPool struct {
@@ -27,25 +21,11 @@ type WorkerPool struct {
 	wg          sync.WaitGroup
 }
 
-type WP struct {
-	wCount  int
-	tbs     *TBS
-	request chan int
-	result  chan string
-	wg      sync.WaitGroup
-}
-
-func (tbs *TicketBookingSystem) BookTicket() bool {
-	tbs.mx.Lock()
-	defer tbs.mx.Unlock()
-
-	if tbs.totalTickets > tbs.bookedTickets {
-		tbs.bookedTickets++
-		return true
+func NewTicketBookingSystem(totalTickets int64) *TicketBookingSystem {
+	return &TicketBookingSystem{
+		totalTickets: int64(totalTickets),
+		tBooked:      make(map[int]int),
 	}
-	tbs.totalFailed++
-
-	return false
 }
 
 func NewWorkerPool(workerCount int, totalUsers int, tbs *TicketBookingSystem) *WorkerPool {
@@ -57,13 +37,18 @@ func NewWorkerPool(workerCount int, totalUsers int, tbs *TicketBookingSystem) *W
 	}
 }
 
-func NewWP(workerCount int, totalUsers int, tbs *TBS) *WP {
-	return &WP{
-		wCount:  workerCount,
-		tbs:     tbs,
-		request: make(chan int, totalUsers),
-		result:  make(chan string, totalUsers),
+func (tbs *TicketBookingSystem) BookTicket(userID int) bool {
+	tbs.mx.Lock()
+	defer tbs.mx.Unlock()
+
+	if tbs.totalTickets > tbs.bookedTickets {
+		tbs.bookedTickets++
+		tbs.tBooked[userID]++
+		return true
 	}
+	tbs.totalFailed++
+
+	return false
 }
 
 // Worker this is actual worker to book a ticket and respond with a result
@@ -71,7 +56,7 @@ func (wp *WorkerPool) Worker(id int) {
 	defer wp.wg.Done()
 	for userID := range wp.request {
 		fmt.Printf("worker %d processing user %d\n", id, userID)
-		if wp.tbs.BookTicket() {
+		if wp.tbs.BookTicket(userID) {
 			wp.result <- fmt.Sprintf("User %d successfully booked a ticket.", userID)
 		} else {
 			wp.result <- fmt.Sprintf("User %d failed to book a ticket.", userID)
@@ -89,7 +74,7 @@ func (wp *WorkerPool) Start(totalUsers int) {
 	// send booking request
 	for i := 1; i <= totalUsers; i++ {
 		wp.request <- i
-		time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
+		//time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
 	}
 	close(wp.request)
 
@@ -108,7 +93,7 @@ func (wp *WorkerPool) Done() {
 	}
 
 	duplicates := false
-	for userID, count := range bookingCount {
+	for userID, count := range wp.tbs.tBooked {
 		if count > 1 {
 			fmt.Printf("User %d booked multiple tickets: %d times\n", userID, count)
 			duplicates = true
@@ -135,7 +120,7 @@ func main() {
 	// Print the parsed values
 	fmt.Printf("Running with totalTickets=%d totalUsers=%d workerCount=%d\n", totalTickets, totalUsers, workerCount)
 
-	tbs := &TicketBookingSystem{totalTickets: int64(totalTickets)}
+	tbs := NewTicketBookingSystem(totalTickets)
 	workerPool := NewWorkerPool(workerCount, totalUsers, tbs)
 
 	workerPool.Start(totalUsers)
