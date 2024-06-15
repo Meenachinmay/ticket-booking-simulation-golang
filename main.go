@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -121,9 +122,18 @@ func (wp *WorkerPool) Done() {
 }
 
 func main() {
-	totalTickets := 50
-	totalUsers := 100
-	workerCount := 10
+	var totalTickets int64
+	var totalUsers int
+	var workerCount int
+
+	// Define command-line flags
+	flag.Int64Var(&totalTickets, "totalTickets", 50, "Total number of tickets available")
+	flag.IntVar(&totalUsers, "totalUsers", 100, "Total number of users trying to book tickets")
+	flag.IntVar(&workerCount, "workerCount", 10, "Number of workers processing the bookings")
+	flag.Parse()
+
+	// Print the parsed values
+	fmt.Printf("Running with totalTickets=%d totalUsers=%d workerCount=%d\n", totalTickets, totalUsers, workerCount)
 
 	tbs := &TicketBookingSystem{totalTickets: int64(totalTickets)}
 	workerPool := NewWorkerPool(workerCount, totalUsers, tbs)
