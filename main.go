@@ -1,8 +1,12 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
 	"sync"
 )
 
@@ -11,6 +15,12 @@ type TicketBookingSystem struct {
 	mx                          sync.Mutex
 	totalFailed                 int64
 	tBooked                     map[int]int
+	bookingRequests             chan BookingRequest
+}
+
+type BookingRequest struct {
+	userID int
+	result chan bool
 }
 
 type WorkerPool struct {
@@ -22,10 +32,36 @@ type WorkerPool struct {
 }
 
 func NewTicketBookingSystem(totalTickets int64) *TicketBookingSystem {
-	return &TicketBookingSystem{
-		totalTickets: int64(totalTickets),
-		tBooked:      make(map[int]int),
+	tbs := &TicketBookingSystem{
+		totalTickets:    totalTickets,
+		tBooked:         make(map[int]int),
+		bookingRequests: make(chan BookingRequest, 10000),
 	}
+	go tbs.processBookings()
+	return tbs
+}
+
+func (tbs *TicketBookingSystem) processBookings() {
+	for request := range tbs.bookingRequests {
+		success := false
+		tbs.mx.Lock()
+		if tbs.totalTickets > tbs.bookedTickets {
+			tbs.bookedTickets++
+			tbs.tBooked[request.userID]++
+			success = true
+		} else {
+			tbs.totalFailed++
+		}
+		tbs.mx.Unlock()
+		request.result <- success
+	}
+}
+
+func (tbs *TicketBookingSystem) BookTicket(userID int) bool {
+	result := make(chan bool)
+	tbs.bookingRequests <- BookingRequest{userID: userID, result: result}
+	return <-result
+
 }
 
 func NewWorkerPool(workerCount int, totalUsers int, tbs *TicketBookingSystem) *WorkerPool {
@@ -37,25 +73,11 @@ func NewWorkerPool(workerCount int, totalUsers int, tbs *TicketBookingSystem) *W
 	}
 }
 
-func (tbs *TicketBookingSystem) BookTicket(userID int) bool {
-	tbs.mx.Lock()
-	defer tbs.mx.Unlock()
-
-	if tbs.totalTickets > tbs.bookedTickets {
-		tbs.bookedTickets++
-		tbs.tBooked[userID]++
-		return true
-	}
-	tbs.totalFailed++
-
-	return false
-}
-
 // Worker this is actual worker to book a ticket and respond with a result
 func (wp *WorkerPool) Worker(id int) {
 	defer wp.wg.Done()
 	for userID := range wp.request {
-		fmt.Printf("worker %d processing user %d\n", id, userID)
+		//fmt.Printf("worker %d processing user %d\n", id, userID)
 		if wp.tbs.BookTicket(userID) {
 			wp.result <- fmt.Sprintf("User %d successfully booked a ticket.", userID)
 		} else {
@@ -64,14 +86,15 @@ func (wp *WorkerPool) Worker(id int) {
 	}
 }
 
+// Start starting worker in this method: every call for worker inside a go routine
 func (wp *WorkerPool) Start(totalUsers int) {
-	// start worker pool
+	// assigning a go routine equals to no of worker count
 	for w := 1; w <= wp.workerCount; w++ {
 		wp.wg.Add(1)
 		go wp.Worker(w)
 	}
 
-	// send booking request
+	// pushing a job to the job queue in this case job queue is request channel
 	for i := 1; i <= totalUsers; i++ {
 		wp.request <- i
 		//time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
@@ -112,9 +135,9 @@ func main() {
 	var workerCount int
 
 	// Define command-line flags
-	flag.Int64Var(&totalTickets, "totalTickets", 50, "Total number of tickets available")
-	flag.IntVar(&totalUsers, "totalUsers", 100, "Total number of users trying to book tickets")
-	flag.IntVar(&workerCount, "workerCount", 10, "Number of workers processing the bookings")
+	flag.Int64Var(&totalTickets, "totalTickets", 500, "Total number of tickets available")
+	flag.IntVar(&totalUsers, "totalUsers", 1500, "Total number of users trying to book tickets")
+	flag.IntVar(&workerCount, "workerCount", 50, "Number of workers processing the bookings")
 	flag.Parse()
 
 	// Print the parsed values
@@ -125,4 +148,89 @@ func main() {
 
 	workerPool.Start(totalUsers)
 	workerPool.Done()
+
+}
+
+type Payload struct {
+	Name string `json:"name"`
+}
+
+func postHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST method allow ONLY", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload Payload
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+
+	//create a response
+	response := map[string]string{"status": "success", "name": payload.Name}
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func connectDatabase(dbURL string) (*sql.DB, error) {
+	conn, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+		return nil, err
+	}
+
+	var testQuery int
+	err = conn.QueryRow("SELECT 1").Scan(&testQuery)
+	if err != nil {
+		log.Fatal("Database query test failed...", err)
+	} else {
+		log.Println("Connection test query succeeded")
+	}
+
+	return conn, nil
+}
+
+type AllowedPositions interface {
+	int64 | float64 | string
+}
+
+type Position[T AllowedPositions] struct {
+	X, Y, Z T
+}
+
+type Entity[T AllowedPositions] interface {
+	GetPosition() Position[T]
+	UpdatePosition(Position[T]) Position[T]
+}
+
+type Player[T AllowedPositions] struct {
+	position Position[T]
+}
+
+func (p *Player[T]) GetPosition() Position[T] {
+	return p.position
+}
+
+func (p *Player[T]) UpdatePosition(position Position[T]) Position[T] {
+	p.position = position
+	return p.position
+}
+
+type Comparable interface {
+	int32 | int64
+}
+
+type GenericSlice[T Comparable] []T
+
+func PrintSlice[T Comparable](slice GenericSlice[T]) {
+	for _, v := range slice {
+		fmt.Println(v)
+	}
 }
